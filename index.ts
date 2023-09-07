@@ -1,19 +1,44 @@
-import { ApolloServer } from "@apollo/server";
-import { startStandaloneServer } from "@apollo/server/standalone";
+import { createSchema, createYoga, createPubSub } from "graphql-yoga";
 import pkg from "@reduxjs/toolkit";
-// import {
-//   users,
-//   events,
-//   locations,
-//   participants,
-// } from "./data.json" assert { type: "json" };
 import { User, Event, Participant, Location, QueryIdArgs } from "./types";
 import { createRequire } from "module"; // Bring in the ability to create the 'require' method
+import { createServer } from "node:http";
 const require = createRequire(import.meta.url); // construct the require method
 const data = require("./data.json");
 const { nanoid } = pkg;
 
 const { users, events, locations, participants } = data;
+
+import { Redis } from "ioredis";
+import { createRedisEventTarget } from "@graphql-yoga/redis-event-target";
+
+const options = {
+  host: process.env.REDIS_HOST,
+  port: Number(process.env.REDIS_PORT),
+  password: process.env.REDIS_PASSWORD,
+  retryStrategy: (times) => {
+    return Math.min(times * 50, 2000);
+  },
+};
+
+const publishClient = new Redis(options);
+const subscribeClient = new Redis(options);
+
+const eventTarget = createRedisEventTarget({
+  publishClient,
+  subscribeClient,
+});
+
+const pubSub = createPubSub<{
+  userCreated: [userCreated: User];
+  userUpdated: [userUpdated: User];
+  eventCreated: [eventCreated: Event];
+  eventUpdated: [eventUpdated: Event];
+  locationCreated: [locationCreated: Location];
+  locationUpdated: [locationUpdated: Location];
+  participantAdded: [participantAdded: Participant];
+  participantUpdated: [participantUpdated: Participant];
+}>({ eventTarget });
 
 const typeDefs = `#graphql
   ## EVENT
@@ -139,6 +164,20 @@ const typeDefs = `#graphql
     deleteLocation(id: ID!): Location!
     deleteAllLocations: DeleteAllOutput!
   }
+
+  type Subscription {
+    userCreated: User!
+    userUpdated: User!
+
+    eventCreated: Event!
+    eventUpdated: Event!
+
+    participantAdded: Participant!
+    participantUpdated: Participant!
+
+    locationCreated: Location!
+    locationUpdated: Location!
+  }
 `;
 
 const resolvers = {
@@ -183,6 +222,7 @@ const resolvers = {
         ...data,
       };
       users.push(user);
+      pubSub.publish("userCreated", user);
       return user;
     },
     updateUser: (parent: User, { id, data }) => {
@@ -191,6 +231,7 @@ const resolvers = {
         throw new Error("User is not found");
       } else {
         users[userIndex] = { ...users[userIndex], ...data };
+        pubSub.publish("userUpdated", users[userIndex]);
         return users[userIndex];
       }
     },
@@ -220,6 +261,7 @@ const resolvers = {
         ...data,
       };
       participants.push(participant);
+      pubSub.publish("participantAdded", participant);
       return participant;
     },
     updateParticipant: (parent: Participant, { id, data }) => {
@@ -233,6 +275,7 @@ const resolvers = {
           ...participants[participantIndex],
           ...data,
         };
+        pubSub.publish("participantUpdated", participants[participantIndex]);
         return participants[participantIndex];
       }
     },
@@ -264,6 +307,7 @@ const resolvers = {
         ...data,
       };
       locations.push(location);
+      pubSub.publish("locationCreated", location);
       return locations;
     },
     updateLocation: (parent: Location, { id, data }) => {
@@ -277,6 +321,7 @@ const resolvers = {
           ...locations[locationIndex],
           ...data,
         };
+        pubSub.publish("locationUpdated", locations[locationIndex]);
         return locations[locationIndex];
       }
     },
@@ -308,6 +353,7 @@ const resolvers = {
         ...data,
       };
       events.push(event);
+      pubSub.publish("eventCreated", event);
       return events;
     },
     updateEvent: (parent: Event, { id, data }) => {
@@ -319,6 +365,7 @@ const resolvers = {
           ...events[eventIndex],
           ...data,
         };
+        pubSub.publish("eventUpdated", events[eventIndex]);
         return events[eventIndex];
       }
     },
@@ -341,15 +388,51 @@ const resolvers = {
       };
     },
   },
+  Subscription: {
+    userCreated: {
+      subscribe: () => pubSub.subscribe("userCreated"),
+      resolve: (payload) => payload,
+    },
+    userUpdated: {
+      subscribe: () => pubSub.subscribe("userUpdated"),
+      resolve: (payload) => payload,
+    },
+    eventCreated: {
+      subscribe: () => pubSub.subscribe("eventCreated"),
+      resolve: (payload) => payload,
+    },
+    eventUpdated: {
+      subscribe: () => pubSub.subscribe("eventUpdated"),
+      resolve: (payload) => payload,
+    },
+    participantAdded: {
+      subscribe: () => pubSub.subscribe("participantAdded"),
+      resolve: (payload) => payload,
+    },
+    participantUpdated: {
+      subscribe: () => pubSub.subscribe("participantUpdated"),
+      resolve: (payload) => payload,
+    },
+    locationCreated: {
+      subscribe: () => pubSub.subscribe("locationCreated"),
+      resolve: (payload) => payload,
+    },
+    locationUpdated: {
+      subscribe: () => pubSub.subscribe("locationUpdated"),
+      resolve: (payload) => payload,
+    },
+  },
 };
 
-const server = new ApolloServer({
+const schema = createSchema({
   typeDefs,
   resolvers,
 });
 
-const { url } = await startStandaloneServer(server, {
-  listen: { port: 4000 },
-});
+const yoga = createYoga({ schema });
 
-console.log(`🚀  Server ready at: ${url}`);
+const server = createServer(yoga);
+
+server.listen(4000, () => {
+  console.info("Server is running on http://localhost:4000/graphql");
+});
